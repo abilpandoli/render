@@ -52,9 +52,16 @@ def process_plate(
     response = gemini_client.models.generate_content(
         model="gemini-3.1-flash-lite",
         contents=[
-            "Extract only the vehicle license plate text from this image."
-            " Return just the uppercase alphanumeric code, or 'UNKNOWN' if"
-            " unreadable.",
+            "Extract license plate details from this plate image."
+            "Return ONLY a valid JSON object with these keys."
+            '- "number": license plate number'
+            '- "code": plate code/prefix (or null if none)'
+            '- "state_or_region": state, emirate, or region, not country (or null if none)'
+            '- "country": country name (or null if none)'
+            '- "type": vehicle type (or null if unknown)'
+            '- "brand": vehicle brand (or null if unknown)'
+            '- "model": vehicle model (or null if unknown)'
+            '- "color": vehicle color (or null if unknown)',
             image,
         ],
     )
