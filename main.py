@@ -1,12 +1,12 @@
 import base64
-import io
+import json
 import os
-from fastapi import FastAPI, Header, HTTPException
+import time
+
+from fastapi import BackgroundTasks, FastAPI, Header, HTTPException
 from openai import OpenAI
-from PIL import Image
 from pydantic import BaseModel
 import requests
-import json
 
 app = FastAPI(title="ALPR Qwen3-VL Proxy")
 
@@ -46,6 +46,26 @@ def parse_plate_response(response_text: str) -> dict:
   return plate_data
 
 
+def log_plate_to_supabase(plate_text: str) -> None:
+  if not SUPABASE_URL or not SUPABASE_KEY:
+    return
+
+  try:
+    requests.post(
+        f"{SUPABASE_URL}/rest/v1/trial_plates",
+        headers={
+            "apikey": SUPABASE_KEY,
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+        json={"plate_ocr": plate_text},
+        timeout=3,
+    )
+  except Exception as log_err:
+    print(f"Supabase logging error: {log_err}")
+
+
 @app.get("/")
 def health_check():
   return {"status": "online", "message": "ALPR Proxy is running"}
@@ -53,9 +73,12 @@ def health_check():
 
 @app.post("/process-plate")
 def process_plate(
+    background_tasks: BackgroundTasks,
     payload: PlateRequest,
     x_client_token: str = Header(None, alias="X-Client-Token"),
 ):
+  request_started = time.perf_counter()
+
   # 1. Security Check: Reject callers who do not have the client secret
   if not SECRET_CLIENT_TOKEN or x_client_token != SECRET_CLIENT_TOKEN:
     raise HTTPException(status_code=401, detail="Unauthorized client token")
@@ -66,17 +89,14 @@ def process_plate(
     )
 
   try:
-    # 2. Convert base64 string back to an image
+    # 2. Validate the JPEG data while preserving it for direct forwarding.
+    image_started = time.perf_counter()
     encoded_image = payload.image_base64.split(",", 1)[-1]
-    image_bytes = base64.b64decode(encoded_image, validate=True)
-    image = Image.open(io.BytesIO(image_bytes))
-    image.load()
+    base64.b64decode(encoded_image, validate=True)
+    image_processing_ms = (time.perf_counter() - image_started) * 1000
 
     # 3. Fast direct request to Qwen API
-    image_buffer = io.BytesIO()
-    image.convert("RGB").save(image_buffer, format="JPEG", quality=92)
-    image_data = base64.b64encode(image_buffer.getvalue()).decode("ascii")
-
+    qwen_started = time.perf_counter()
     response = qwen_client.chat.completions.create(
       model="qwen3-vl-flash",
       messages=[
@@ -86,7 +106,7 @@ def process_plate(
             {
               "type": "image_url",
               "image_url": {
-                "url": f"data:image/jpeg;base64,{image_data}"
+                "url": f"data:image/jpeg;base64,{encoded_image}"
               },
             },
             {
@@ -109,6 +129,7 @@ def process_plate(
       ],
       extra_body={"enable_thinking": False},
     )
+    qwen_ms = (time.perf_counter() - qwen_started) * 1000
 
     response_text = response.choices[0].message.content or ""
     if not response_text:
@@ -129,22 +150,9 @@ def process_plate(
 
     action = "OPEN" if plate_text != "UNKNOWN" else "DO NOT OPEN"
 
-    # 4. Asynchronous log to Supabase directly from Render backend
-    if SUPABASE_URL and SUPABASE_KEY:
-      try:
-        requests.post(
-            f"{SUPABASE_URL}/rest/v1/trial_plates",
-            headers={
-                "apikey": SUPABASE_KEY,
-                "Authorization": f"Bearer {SUPABASE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "return=minimal",
-            },
-            json={"plate_ocr": plate_text},
-            timeout=3,
-        )
-      except Exception as log_err:
-        print(f"Supabase logging error: {log_err}")
+    # 4. Log after returning the gate decision to the device.
+    background_tasks.add_task(log_plate_to_supabase, plate_text)
+    server_total_ms = (time.perf_counter() - request_started) * 1000
 
     return {
         "action": action,
@@ -152,6 +160,11 @@ def process_plate(
         "message": (
             "Access Granted" if action == "OPEN" else "Plate Unrecognized"
         ),
+          "timings": {
+            "image_processing_ms": round(image_processing_ms),
+            "qwen_ms": round(qwen_ms),
+            "server_total_ms": round(server_total_ms),
+          },
     }
 
   except (ValueError, OSError) as error:
