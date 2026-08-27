@@ -4,4 +4,3 @@ google-genai
 pillow
 pydantic
 requests
-json
