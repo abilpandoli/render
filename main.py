@@ -25,6 +25,22 @@ class PlateRequest(BaseModel):
   image_base64: str
 
 
+def parse_plate_response(response_text: str) -> dict:
+  text = response_text.strip()
+  if text.startswith("```"):
+    lines = text.splitlines()
+    if lines and lines[0].startswith("```"):
+      lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+      lines = lines[:-1]
+    text = "\n".join(lines).strip()
+
+  plate_data = json.loads(text)
+  if not isinstance(plate_data, dict):
+    raise ValueError("Gemini returned JSON that is not an object")
+  return plate_data
+
+
 @app.get("/")
 def health_check():
   return {"status": "online", "message": "ALPR Proxy is running"}
@@ -46,8 +62,10 @@ def process_plate(
 
   try:
     # 2. Convert base64 string back to an image
-    image_bytes = base64.b64decode(payload.image_base64)
+    encoded_image = payload.image_base64.split(",", 1)[-1]
+    image_bytes = base64.b64decode(encoded_image, validate=True)
     image = Image.open(io.BytesIO(image_bytes))
+    image.load()
 
     # 3. Fast direct request to Gemini API
     response = gemini_client.models.generate_content(
@@ -65,10 +83,12 @@ def process_plate(
             "- 'color': vehicle color (or null if unknown).",
             image,
         ],
+        config={"response_mime_type": "application/json"},
     )
 
-    plate_text = response.text.strip() if response.text else "UNKNOWN"
-    plate_data = json.loads(plate_text) if plate_text != "UNKNOWN" else {}
+    if not response.text:
+      raise ValueError("Gemini returned an empty response")
+    plate_data = parse_plate_response(response.text)
 
     plate_text = (
         f"Number:        {plate_data.get('number')}\n"
@@ -80,7 +100,7 @@ def process_plate(
         f"Model:         {plate_data.get('model')}\n"
         f"Color:         {plate_data.get('color')}\n\n"
         "Metrics\n"
-    ) if plate_data else "UNKNOWN"
+    ) if plate_data.get("number") else "UNKNOWN"
 
     action = "OPEN" if plate_text != "UNKNOWN" else "DO NOT OPEN"
 
@@ -109,5 +129,11 @@ def process_plate(
         ),
     }
 
-  except Exception as e:
-    raise HTTPException(status_code=500, detail=str(e))
+  except (ValueError, OSError) as error:
+    raise HTTPException(status_code=400, detail=str(error)) from error
+  except HTTPException:
+    raise
+  except Exception as error:
+    raise HTTPException(
+        status_code=502, detail=f"Plate processing service failed: {error}"
+    ) from error
