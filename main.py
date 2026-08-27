@@ -51,7 +51,7 @@ def process_plate(
 
     # 3. Fast direct request to Gemini API
     response = gemini_client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.1-flash-lite",
         contents=[
             "Extract license plate details from this plate image. "
             "Return ONLY a valid JSON object with these keys: "
