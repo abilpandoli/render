@@ -6,6 +6,7 @@ from google import genai
 from PIL import Image
 from pydantic import BaseModel
 import requests
+import json
 
 app = FastAPI(title="ALPR Gemini Proxy")
 
@@ -50,23 +51,37 @@ def process_plate(
 
     # 3. Fast direct request to Gemini API
     response = gemini_client.models.generate_content(
-        model="gemini-3.1-flash-lite",
+        model="gemini-2.5-flash",
         contents=[
-            "Extract license plate details from this plate image."
-            "Return ONLY a valid JSON object with these keys."
-            '- "number": license plate number'
-            '- "code": plate code/prefix (or null if none)'
-            '- "state_or_region": state, emirate, or region, not country (or null if none)'
-            '- "country": country name (or null if none)'
-            '- "type": vehicle type (or null if unknown)'
-            '- "brand": vehicle brand (or null if unknown)'
-            '- "model": vehicle model (or null if unknown)'
-            '- "color": vehicle color (or null if unknown)',
+            "Extract license plate details from this plate image. "
+            "Return ONLY a valid JSON object with these keys: "
+            "- 'number': license plate number, "
+            "- 'code': plate code/prefix (or null if none), "
+            "- 'state_or_region': state, emirate, or region, not country (or null if none), "
+            "- 'country': country name (or null if none), "
+            "- 'type': vehicle type (or null if unknown), "
+            "- 'brand': vehicle brand (or null if unknown), "
+            "- 'model': vehicle model (or null if unknown), "
+            "- 'color': vehicle color (or null if unknown).",
             image,
         ],
     )
 
     plate_text = response.text.strip() if response.text else "UNKNOWN"
+    plate_data = json.loads(plate_text) if plate_text != "UNKNOWN" else {}
+
+    plate_text = (
+        f"Number:        {plate_data.get('number')}\n"
+        f"Code:          {plate_data.get('code')}\n"
+        f"Country:       {plate_data.get('country')}\n"
+        f"State/Region:  {plate_data.get('state_or_region')}\n"
+        f"Type:          {plate_data.get('type')}\n"
+        f"Brand:         {plate_data.get('brand')}\n"
+        f"Model:         {plate_data.get('model')}\n"
+        f"Color:         {plate_data.get('color')}\n\n"
+        "Metrics\n"
+    ) if plate_data else "UNKNOWN"
+
     action = "OPEN" if plate_text != "UNKNOWN" else "DO NOT OPEN"
 
     # 4. Asynchronous log to Supabase directly from Render backend
