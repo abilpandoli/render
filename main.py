@@ -2,22 +2,27 @@ import base64
 import io
 import os
 from fastapi import FastAPI, Header, HTTPException
-from google import genai
+from openai import OpenAI
 from PIL import Image
 from pydantic import BaseModel
 import requests
 import json
 
-app = FastAPI(title="ALPR Gemini Proxy")
+app = FastAPI(title="ALPR Qwen3-VL Proxy")
 
 # Load environment variables configured on Render
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 SECRET_CLIENT_TOKEN = os.getenv("SECRET_CLIENT_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-gemini_client = (
-    genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+qwen_client = (
+  OpenAI(
+    api_key=QWEN_API_KEY,
+    base_url="https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+  )
+  if QWEN_API_KEY
+  else None
 )
 
 
@@ -37,7 +42,7 @@ def parse_plate_response(response_text: str) -> dict:
 
   plate_data = json.loads(text)
   if not isinstance(plate_data, dict):
-    raise ValueError("Gemini returned JSON that is not an object")
+    raise ValueError("Qwen returned JSON that is not an object")
   return plate_data
 
 
@@ -55,9 +60,9 @@ def process_plate(
   if not SECRET_CLIENT_TOKEN or x_client_token != SECRET_CLIENT_TOKEN:
     raise HTTPException(status_code=401, detail="Unauthorized client token")
 
-  if not GEMINI_API_KEY or not gemini_client:
+  if not QWEN_API_KEY or not qwen_client:
     raise HTTPException(
-        status_code=500, detail="Gemini API key missing on server"
+        status_code=500, detail="Qwen API key missing on server"
     )
 
   try:
@@ -67,28 +72,48 @@ def process_plate(
     image = Image.open(io.BytesIO(image_bytes))
     image.load()
 
-    # 3. Fast direct request to Gemini API
-    response = gemini_client.models.generate_content(
-        model="gemini-3.1-flash-lite",
-        contents=[
-            "Extract license plate details from this plate image. "
-            "Return ONLY a valid JSON object with these keys: "
-            "- 'number': license plate number, "
-            "- 'code': plate code/prefix (or null if none), "
-            "- 'state_or_region': state, emirate, or region, not country (or null if none), "
-            "- 'country': country name (or null if none), "
-            "- 'type': vehicle type (or null if unknown), "
-            "- 'brand': vehicle brand (or null if unknown), "
-            "- 'model': vehicle model (or null if unknown), "
-            "- 'color': vehicle color (or null if unknown).",
-            image,
-        ],
-        config={"response_mime_type": "application/json"},
+    # 3. Fast direct request to Qwen API
+    image_buffer = io.BytesIO()
+    image.convert("RGB").save(image_buffer, format="JPEG", quality=92)
+    image_data = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+    response = qwen_client.chat.completions.create(
+      model="qwen3-vl-flash",
+      messages=[
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": f"data:image/jpeg;base64,{image_data}"
+              },
+            },
+            {
+              "type": "text",
+              "text": (
+                "Extract license plate details from this plate image. "
+                "Return ONLY a valid JSON object with these keys: "
+                "- 'number': license plate number without code, "
+                "- 'code': plate code/prefix (or null if none), "
+                "- 'state_or_region': state, emirate, or region, not country (or null if none), "
+                "- 'country': country name (or null if none), "
+                "- 'type': vehicle type (or null if unknown), "
+                "- 'brand': vehicle brand (or null if unknown), "
+                "- 'model': vehicle model (or null if unknown), "
+                "- 'color': vehicle color (or null if unknown)."
+              ),
+            },
+          ],
+        }
+      ],
+      extra_body={"enable_thinking": False},
     )
 
-    if not response.text:
-      raise ValueError("Gemini returned an empty response")
-    plate_data = parse_plate_response(response.text)
+    response_text = response.choices[0].message.content or ""
+    if not response_text:
+      raise ValueError("Qwen returned an empty response")
+    plate_data = parse_plate_response(response_text)
 
     plate_text = (
         f"Number:        {plate_data.get('number')}\n"
